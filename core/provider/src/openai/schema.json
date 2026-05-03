@@ -1,0 +1,66 @@
+{
+  "provider_config": {
+    "base_url": {
+      "name": "Base URL",
+      "type": "string",
+      "default": "https://api.openai.com/v1",
+      "hint": "Base URL, compatible to OpenAI format platform"
+    },
+    "api_key": {
+      "name": "API Key",
+      "type": "sensitive",
+      "default": null,
+      "hint": "Your API Key from your provider"
+    },
+    "headers": {
+      "name": "Custom Headers",
+      "type": "json",
+      "default": {},
+      "hint": "Custom headers passed to OpenAI Client"
+    }
+  },
+  "model_config": {
+    "llm": {
+      "timeout": {
+        "name": "Timeout",
+        "type": "integer",
+        "default": 120,
+        "min": 1,
+        "hint": "Timeout seconds"
+      },
+      "temperature": {
+        "name": "Temperature",
+        "type": "float",
+        "default": null,
+        "min": 0,
+        "max": 2,
+        "hint": "Model temperature"
+      }
+    },
+    "image": {
+      "size": {
+        "name": "Image Size",
+        "type": "string",
+        "default": null,
+        "enum": ["256x256", "512x512", "1024x1024", "1024x1792", "1792x1024"],
+        "hint": "Image size (e.g., 1024x1024)"
+      }
+    },
+    "embedding": {
+      "timeout": {
+        "name": "Timeout",
+        "type": "integer",
+        "default": 60,
+        "min": 1,
+        "hint": "Request timeout in seconds"
+      },
+      "slow_request_threshold": {
+        "name": "Slow Request Threshold",
+        "type": "float",
+        "default": 5.0,
+        "min": 0,
+        "hint": "Requests slower than this threshold (seconds) will be logged as slow requests"
+      }
+    }
+  }
+}

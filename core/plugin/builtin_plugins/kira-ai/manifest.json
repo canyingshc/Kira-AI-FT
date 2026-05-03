@@ -1,0 +1,9 @@
+{
+    "display_name": "builtin",
+    "plugin_id": "kira-ai",
+    "hide": true,
+    "version": "1.0.0",
+    "author": "KiraAI",
+    "description": "Builtin plugin, decorating message metadata",
+    "repo": null
+}

@@ -1,0 +1,677 @@
+import os
+import json
+import time
+import uuid
+import importlib.util
+import inspect
+from typing import Dict, Optional, Type
+
+from .provider import (
+    BaseProvider, BaseModelClient, ProviderInfo, ModelInfo, ModelType,
+    LLMModelClient, TTSModelClient, STTModelClient, ImageModelClient,
+    VideoModelClient, EmbeddingModelClient, RerankModelClient
+)
+from .llm_model import LLMRequest
+
+from core.utils.path_utils import get_config_path
+from core.logging_manager import get_logger
+from core.config import KiraConfig
+from core.config.config_field import BaseConfigField, build_fields
+from core.db.service import DatabaseService
+
+logger = get_logger("provider_manager", "cyan")
+
+
+class ProviderManager:
+    """管理所有 Provider"""
+    
+    _instance = None
+    _providers: Dict[str, BaseProvider] = {}  # Provider instances
+    _provider_configs: Dict[str, dict]
+    
+    # Registry data
+    _registry: Dict[str, Type[BaseProvider]] = {}  # Provider classes
+    _manifests: Dict[str, dict] = {}
+    _schemas: Dict[str, dict] = {}
+    
+    def __new__(cls, db: DatabaseService, kira_config: KiraConfig):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self, db: DatabaseService, kira_config: KiraConfig):
+        if not hasattr(self, '_initialized'):
+            self._initialized = True
+            
+            # Load providers from src directory using Registry logic
+            src_dir = os.path.join(os.path.dirname(__file__), "src")
+            self.scan_providers(src_dir)
+
+            self.db = db
+            self.kira_config = kira_config
+            
+            self.providers_config = kira_config.get("providers", {})
+            self._load_providers()
+            
+    @classmethod
+    def get_provider_class(cls, name: str) -> Optional[Type]:
+        return cls._registry.get(name)
+
+    @classmethod
+    def get_provider_types(cls) -> list[str]:
+        return list(cls._registry.keys())
+
+    @classmethod
+    def get_schema(cls, name: str) -> dict:
+        return cls._schemas.get(name, {})
+
+    def get_model_client(self, provider_id: str, model_id: str) -> Optional[BaseModelClient]:
+        provider = self.get_provider(provider_id)
+        model_info = self.get_model_info(provider_id, model_id)
+        if not model_info:
+            return
+        model_type_enum = model_info.model_type
+
+        if model_type_enum not in provider.models:
+            raise ValueError(f"Unsupported model type {model_type_enum.value}")
+
+        model_cls = provider.models[model_type_enum]
+        model_client = model_cls(model_info)
+        return model_client
+
+    def get_default_llm(self) -> LLMModelClient:
+        model_info = self.get_default_model_info("default_llm")
+        model_client = self.get_model_client(model_info.provider_id, model_info.model_id)
+        if not isinstance(model_client, LLMModelClient):
+            raise TypeError(
+                f"Expected LLMModelClient, got {type(model_client).__name__}"
+            )
+        return model_client
+
+    def get_default_fast_llm(self) -> LLMModelClient:
+        model_info = self.get_default_model_info("default_fast_llm")
+        model_client = self.get_model_client(model_info.provider_id, model_info.model_id)
+        if not isinstance(model_client, LLMModelClient):
+            raise TypeError(
+                f"Expected LLMModelClient, got {type(model_client).__name__}"
+            )
+        return model_client
+
+    def get_default_vlm(self) -> LLMModelClient:
+        model_info = self.get_default_model_info("default_vlm")
+        model_client = self.get_model_client(model_info.provider_id, model_info.model_id)
+        if not isinstance(model_client, LLMModelClient):
+            raise TypeError(
+                f"Expected LLMModelClient, got {type(model_client).__name__}"
+            )
+        return model_client
+
+    def get_default_tts(self) -> TTSModelClient:
+        model_info = self.get_default_model_info("default_tts")
+        model_client = self.get_model_client(model_info.provider_id, model_info.model_id)
+        if not isinstance(model_client, TTSModelClient):
+            raise TypeError(
+                f"Expected TTSModelClient, got {type(model_client).__name__}"
+            )
+        return model_client
+
+    def get_default_stt(self) -> STTModelClient:
+        model_info = self.get_default_model_info("default_stt")
+        model_client = self.get_model_client(model_info.provider_id, model_info.model_id)
+        if not isinstance(model_client, STTModelClient):
+            raise TypeError(
+                f"Expected STTModelClient, got {type(model_client).__name__}"
+            )
+        return model_client
+
+    def get_default_image(self) -> ImageModelClient:
+        model_info = self.get_default_model_info("default_image")
+        model_client = self.get_model_client(model_info.provider_id, model_info.model_id)
+        if not isinstance(model_client, ImageModelClient):
+            raise TypeError(
+                f"Expected ImageModelClient, got {type(model_client).__name__}"
+            )
+        return model_client
+
+    def get_default_video(self) -> VideoModelClient:
+        model_info = self.get_default_model_info("default_video")
+        model_client = self.get_model_client(model_info.provider_id, model_info.model_id)
+        if not isinstance(model_client, VideoModelClient):
+            raise TypeError(
+                f"Expected VideoModelClient, got {type(model_client).__name__}"
+            )
+        return model_client
+
+    def get_default_embedding(self) -> EmbeddingModelClient:
+        model_info = self.get_default_model_info("default_embedding")
+        model_client = self.get_model_client(model_info.provider_id, model_info.model_id)
+        if not isinstance(model_client, EmbeddingModelClient):
+            raise TypeError(
+                f"Expected EmbeddingModelClient, got {type(model_client).__name__}"
+            )
+        return model_client
+
+    def get_default_rerank(self) -> RerankModelClient:
+        model_info = self.get_default_model_info("default_rerank")
+        model_client = self.get_model_client(model_info.provider_id, model_info.model_id)
+        if not isinstance(model_client, RerankModelClient):
+            raise TypeError(
+                f"Expected RerankModelClient, got {type(model_client).__name__}"
+            )
+        return model_client
+
+    def get_default_model_info(self, model_key: str):
+        default_model = self.kira_config.get_config(f"models.{model_key}")
+        if not default_model:
+            raise ValueError(f"{model_key} not set")
+        if default_model and ":" in default_model:
+            model_provider = default_model.split(":")[0]
+            model_id = ":".join(default_model.split(":")[1:])
+
+            model_type_mapping = {
+                "default_llm": "llm",
+                "default_fast_llm": "llm",
+                "default_vlm": "llm",
+                "default_tts": "tts",
+                "default_stt": "stt",
+                "default_image": "image",
+                "default_embedding": "embedding",
+                "default_rerank": "rerank",
+                "default_video": "video"
+            }
+            model_type = model_type_mapping[model_key]
+            model_type_enum = ModelType(model_type)
+
+            model_info = ModelInfo(
+                model_type_enum,
+                model_id,
+                model_provider,
+                self.kira_config.get_config(f"providers.{model_provider}.name"),
+                self.kira_config.get_config(f"providers.{model_provider}.provider_config"),
+                # When the model ID has a dot, kira_config.get_config would return unexpected value
+                self.kira_config.get_config(f"providers.{model_provider}.model_config.{model_type}").get(model_id)
+            )
+            return model_info
+
+    def get_provider_info(self, provider_id: str) -> Optional[ProviderInfo]:
+        providers_config = self.kira_config.get("providers", {})
+        config = providers_config.get(provider_id)
+        if not config:
+            return None
+        provider_config = config.get("provider_config", {}) or {}
+        if "name" in provider_config and "name" not in config:
+            config["name"] = provider_config.pop("name")
+            self.kira_config["providers"][provider_id] = config
+            self.kira_config.save_config()
+        provider_type = config.get("format", "unknown")
+        provider_name = config.get("name", provider_id)
+        return ProviderInfo(
+            provider_name=provider_name,
+            provider_id=provider_id,
+            provider_type=provider_type,
+            provider_config=provider_config,
+        )
+
+    def register_provider(self, name: str, provider_name: str):
+        """
+        Register a provider instance
+        :param name: name of the provider instance, e.g. openai-official, nvidia
+        :param provider_name: which provider to load from, e.g. OpenAI
+        :return:
+        """
+        if provider_name in self._registry:
+            provider_id = uuid.uuid4().hex[:8]
+            provider_config = self.generate_provider_config(provider_name, provider_id)
+            provider_inst = self._registry[provider_name](provider_id, name, provider_config)
+            self._providers[provider_id] = provider_inst
+            return True
+        else:
+            return False
+
+    def register_model(self, provider_id: str, model_type: str, model_id: str, config: Optional[dict] = None):
+        """
+        Register a model to an existing provider
+        :param provider_id: an ID of an existing provider instance
+        :param model_type: type of the model, e.g. llm, tts, image
+        :param model_id: a specific model ID defined by your provider, e.g. gpt-3.5-turbo
+        :param config: model config
+        :return:
+        """
+        providers_config = self.kira_config.get("providers", {})
+        provider_config = providers_config.get(provider_id)
+        if not provider_config:
+            logger.error(f"Provider {provider_id} not found in config")
+            return False
+        
+        model_config_root = provider_config.setdefault("model_config", {})
+        model_type_config = model_config_root.setdefault(model_type, {})
+            
+        # 3. Get default config from schema
+        model_defaults = {}
+        # 提供商的名字，如OpenAI
+        provider_format = provider_config.get("format")
+        if provider_format:
+            schema = self.get_schema(provider_format)
+            if schema:
+                model_fields_root = schema.get("model_config") or {}
+                type_fields = model_fields_root.get(model_type) or []
+                for field in type_fields:
+                    if isinstance(field, BaseConfigField):
+                        model_defaults[field.key] = field.default
+        
+        model_config = dict(model_defaults)
+        if config:
+            model_config.update(config)
+        
+        model_type_config[model_id] = model_config
+        
+        self.kira_config["providers"][provider_id] = provider_config
+        self.kira_config.save_config()
+        
+        try:
+            self.set_provider(provider_id, provider_config)
+        except Exception as e:
+            logger.error(f"Failed to re-instantiate provider {provider_id} after registering model: {e}")
+        logger.info(f"Registered model {model_id} ({model_type}) to provider {provider_id}")
+        return True
+
+    def get_models(self, provider_id: str) -> dict:
+        """Get model info and build model configs"""
+        model_infos = self.get_model_infos(provider_id)
+        models: dict = {}
+        for info in model_infos:
+            type_key = info.model_type.value if isinstance(info.model_type, ModelType) else info.model_type
+            type_dict = models.setdefault(type_key, {})
+            type_dict[info.model_id] = info.model_config
+        return models
+
+    def get_model_info(self, provider_id: str, model_id: str) -> Optional[ModelInfo]:
+        providers_config = self.kira_config.get("providers", {})
+        provider_config = providers_config.get(provider_id) or {}
+        provider_instance_config = provider_config.get("provider_config", {}) or {}
+        provider_name = provider_config.get("name", provider_id)
+        model_config_root = provider_config.get("model_config") or {}
+        for model_type_key, type_models in model_config_root.items():
+            if not isinstance(type_models, dict):
+                continue
+            if model_id in type_models:
+                model_cfg = type_models[model_id]
+                return ModelInfo(
+                    model_type=ModelType(model_type_key),
+                    model_id=model_id,
+                    provider_id=provider_id,
+                    provider_name=provider_name,
+                    provider_config=provider_instance_config,
+                    model_config=model_cfg,
+                )
+        return None
+
+    def get_model_infos(self, provider_id: str) -> list[ModelInfo]:
+        providers_config = self.kira_config.get("providers", {})
+        provider_config = providers_config.get(provider_id) or {}
+        provider_instance_config = provider_config.get("provider_config", {}) or {}
+        provider_name = provider_config.get("name", provider_id)
+        model_config_root = provider_config.get("model_config") or {}
+        model_infos: list[ModelInfo] = []
+        for model_type_key, type_models in model_config_root.items():
+            if not isinstance(type_models, dict):
+                continue
+            for model_id, model_cfg in type_models.items():
+                if not isinstance(model_cfg, dict):
+                    continue
+                model_infos.append(
+                    ModelInfo(
+                        model_type=ModelType(model_type_key),
+                        model_id=model_id,
+                        provider_id=provider_id,
+                        provider_name=provider_name,
+                        provider_config=provider_instance_config,
+                        model_config=model_cfg,
+                    )
+                )
+        return model_infos
+
+    def update_model(self, provider_id: str, model_type: str, model_id: str, config: dict) -> bool:
+        providers_config = self.kira_config.get("providers", {})
+        provider_config = providers_config.get(provider_id)
+        if not provider_config:
+            logger.error(f"Provider {provider_id} not found in config")
+            return False
+
+        model_config_root = provider_config.get("model_config") or {}
+        model_type_config = model_config_root.get(model_type)
+        if not model_type_config or model_id not in model_type_config:
+            logger.error(f"Model {model_id} ({model_type}) not found for provider {provider_id}")
+            return False
+
+        model_type_config[model_id] = config
+        provider_config["model_config"] = model_config_root
+        self.kira_config["providers"][provider_id] = provider_config
+        self.kira_config.save_config()
+
+        try:
+            self.set_provider(provider_id, provider_config)
+        except Exception as e:
+            logger.error(f"Failed to re-instantiate provider {provider_id} after updating model: {e}")
+
+        logger.info(f"Updated model {model_id} ({model_type}) for provider {provider_id}")
+        return True
+
+    def delete_model(self, provider_id: str, model_type: str, model_id: str) -> bool:
+        providers_config = self.kira_config.get("providers", {})
+        provider_config = providers_config.get(provider_id)
+        if not provider_config:
+            logger.error(f"Provider {provider_id} not found in config")
+            return False
+
+        model_config_root = provider_config.get("model_config") or {}
+        model_type_config = model_config_root.get(model_type)
+        if not model_type_config or model_id not in model_type_config:
+            logger.error(f"Model {model_id} ({model_type}) not found for provider {provider_id}")
+            return False
+
+        del model_type_config[model_id]
+        provider_config["model_config"] = model_config_root
+        self.kira_config["providers"][provider_id] = provider_config
+        self.kira_config.save_config()
+
+        try:
+            self.set_provider(provider_id, provider_config)
+        except Exception as e:
+            logger.error(f"Failed to re-instantiate provider {provider_id} after deleting model: {e}")
+
+        logger.info(f"Deleted model {model_id} ({model_type}) for provider {provider_id}")
+        return True
+
+    def sync_models(
+        self,
+        provider_id: str,
+        model_type: str,
+        add_ids: list[str],
+        delete_ids: list[str],
+        config: Optional[dict] = None,
+    ) -> dict:
+        """
+        Batch sync models: add new ones and delete removed ones in a single
+        save + re-instantiate cycle.
+        :param provider_id: provider instance ID
+        :param model_type: e.g. llm, tts, image
+        :param add_ids: model IDs to add
+        :param delete_ids: model IDs to delete
+        :param config: optional config template for newly added models
+        :return: {"added": int, "removed": int, "errors": list[str]}
+        """
+        providers_config = self.kira_config.get("providers", {})
+        provider_config = providers_config.get(provider_id)
+        if not provider_config:
+            return {"added": 0, "removed": 0, "errors": [f"Provider {provider_id} not found"]}
+
+        model_config_root = provider_config.setdefault("model_config", {})
+        model_type_config = model_config_root.setdefault(model_type, {})
+
+        # Build default config from schema
+        model_defaults = {}
+        provider_format = provider_config.get("format")
+        if provider_format:
+            schema = self.get_schema(provider_format)
+            if schema:
+                model_fields_root = schema.get("model_config") or {}
+                type_fields = model_fields_root.get(model_type) or []
+                for field in type_fields:
+                    if isinstance(field, BaseConfigField):
+                        model_defaults[field.key] = field.default
+
+        added = 0
+        removed = 0
+        errors: list[str] = []
+
+        # Add new models
+        for model_id in add_ids:
+            if model_id in model_type_config:
+                continue  # already exists, skip
+            model_cfg = dict(model_defaults)
+            if config:
+                model_cfg.update(config)
+            model_type_config[model_id] = model_cfg
+            added += 1
+
+        # Delete removed models
+        for model_id in delete_ids:
+            if model_id not in model_type_config:
+                continue  # doesn't exist, skip
+            del model_type_config[model_id]
+            removed += 1
+
+        # Single save + re-instantiate
+        self.kira_config["providers"][provider_id] = provider_config
+        self.kira_config.save_config()
+
+        try:
+            self.set_provider(provider_id, provider_config)
+        except Exception as e:
+            errors.append(f"Failed to re-instantiate provider: {e}")
+            logger.error(f"Failed to re-instantiate provider {provider_id} after sync: {e}")
+
+        logger.info(
+            f"Synced models for provider {provider_id} ({model_type}): "
+            f"+{added} -{removed}"
+        )
+        return {"added": added, "removed": removed, "errors": errors}
+
+    async def health_check(self, provider_id: str, model_type: str, model_id: str) -> dict:
+        """
+        Test model availability by sending a simple prompt.
+        :return: {"success": bool, "latency": int (ms), "error": str | None}
+        """
+        try:
+            model_client = self.get_model_client(provider_id, model_id)
+        except Exception as e:
+            return {"success": False, "latency": None, "error": str(e)}
+        if not model_client:
+            return {"success": False, "latency": None, "error": "Model client not found"}
+
+        try:
+            start = time.time()
+
+            if isinstance(model_client, LLMModelClient):
+                request = LLMRequest(
+                    messages=[{"role": "user", "content": "Say 'pong'"}],
+                    tools=None,
+                    tool_choice="none",
+                )
+                await model_client.chat(request)
+            elif isinstance(model_client, TTSModelClient):
+                await model_client.text_to_speech("ping")
+            elif isinstance(model_client, EmbeddingModelClient):
+                await model_client.embed(["ping"])
+            elif isinstance(model_client, RerankModelClient):
+                await model_client.rerank("ping", ["ping"])
+            else:
+                return {
+                    "success": False,
+                    "latency": None,
+                    "error": f"Health check not supported for {model_type} models",
+                }
+
+            latency = round((time.time() - start) * 1000)
+            return {"success": True, "latency": latency, "error": None}
+        except Exception as e:
+            return {"success": False, "latency": None, "error": str(e)}
+
+    @classmethod
+    def scan_providers(cls, src_dir: str):
+        """
+        Scan subdirectories in src_dir for manifest.json and provider.py
+        """
+        if not os.path.exists(src_dir):
+            logger.error(f"Provider source directory not found: {src_dir}")
+            return
+
+        for entry in os.listdir(src_dir):
+            provider_dir = os.path.join(src_dir, entry)
+            if not os.path.isdir(provider_dir):
+                continue
+
+            manifest_path = os.path.join(provider_dir, "manifest.json")
+            if not os.path.exists(manifest_path):
+                continue
+
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                
+                provider_name = manifest.get("name")
+                if not provider_name:
+                    logger.warning(f"Manifest in {provider_dir} missing 'name'")
+                    continue
+
+                # Load schema if exists
+                schema_path = os.path.join(provider_dir, "schema.json")
+                schema: dict = {}
+                if os.path.exists(schema_path):
+                    try:
+                        with open(schema_path, "r", encoding="utf-8") as f:
+                            raw_schema = json.load(f)
+                        if isinstance(raw_schema, dict):
+                            provider_fields: list[BaseConfigField] = []
+                            model_fields: Dict[str, list[BaseConfigField]] = {}
+                            provider_config_schema = raw_schema.get("provider_config") or {}
+                            if isinstance(provider_config_schema, dict):
+                                provider_fields = build_fields(provider_config_schema)
+                            model_config_schema = raw_schema.get("model_config") or {}
+                            if isinstance(model_config_schema, dict):
+                                for model_type, fields_schema in model_config_schema.items():
+                                    if isinstance(fields_schema, dict):
+                                        model_fields[model_type] = build_fields(fields_schema)
+                            schema = {
+                                "provider_config": provider_fields,
+                                "model_config": model_fields,
+                            }
+                    except Exception as e:
+                        logger.warning(f"Failed to load schema for {provider_name}: {e}")
+
+                provider_script = None
+                module_name = None
+                candidate_files = [
+                    (os.path.join(provider_dir, f"{entry}.py"), f"core.provider.src.{entry}.{entry}"),
+                    (os.path.join(provider_dir, "provider.py"), f"core.provider.src.{entry}.provider"),
+                    (os.path.join(provider_dir, "__init__.py"), f"core.provider.src.{entry}"),
+                ]
+                for script_path, candidate_module in candidate_files:
+                    if os.path.exists(script_path):
+                        provider_script = script_path
+                        module_name = candidate_module
+                        break
+                if not provider_script or not module_name:
+                    logger.warning(f"No {entry}.py, provider.py or __init__.py found in {provider_dir}")
+                    continue
+                
+                # Import the module
+                spec = importlib.util.spec_from_file_location(module_name, provider_script)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    
+                    # Find the provider class
+                    found = False
+                    for attr_name, attr_value in inspect.getmembers(module):
+                        if inspect.isclass(attr_value) and issubclass(attr_value, BaseProvider) and attr_value is not BaseProvider:
+                            # Register it using the manifest name
+                            key = provider_name
+                            cls._registry[key] = attr_value
+                            cls._manifests[key] = manifest
+                            cls._schemas[key] = schema
+                            logger.info(f"Registered provider: {provider_name}")
+                            found = True
+                            break
+                    
+                    if not found:
+                        logger.warning(f"No class inheriting from BaseProvider found in {provider_dir}")
+
+            except Exception as e:
+                logger.error(f"Error loading provider from {provider_dir}: {e}")
+    
+    def _load_providers(self):
+        """从配置加载所有 providers"""
+        providers_config = self.providers_config
+        for provider_id, provider in providers_config.items():
+            self.set_provider(provider_id, provider)
+
+    def generate_provider_config(self, provider_format: str, provider_id: str):
+        """
+        Generate provider config file from schema.json.
+        Saves to data/config/provider_{provider_id}.json.
+        """
+        
+        schema = self.get_schema(provider_format)
+        if not schema:
+            logger.error(f"No schema found for provider format: {provider_format}")
+            return
+
+        provider_fields = schema.get("provider_config") or []
+        generated_config = {
+            "format": provider_format,
+            "name": provider_id,
+            "provider_config": {},
+            "model_config": {
+                # model_type: { model_id: { **model_config } }
+            }
+        }
+
+        for field in provider_fields:
+            if isinstance(field, BaseConfigField):
+                generated_config["provider_config"][field.key] = field.default
+
+        try:
+            self.kira_config["providers"][provider_id] = generated_config
+            self.kira_config.save_config()
+            logger.info(f"Generated config for provider {provider_id}")
+        except Exception as e:
+            logger.error(f"Failed to save generated config for {provider_id}: {e}")
+        return generated_config
+
+    def set_provider(self, provider_id: str, provider: dict):
+        provider_type = provider.get("type")
+        provider_format = provider.get("format")
+        provider_name = provider.get("name", provider_id)
+
+        provider_inst = None
+
+        # Try registry first
+        provider_cls = self.get_provider_class(provider_format)
+        if provider_cls:
+            try:
+                provider_inst = provider_cls(
+                    provider_id,
+                    provider_name,
+                    provider.get("provider_config", {}) or {},
+                )
+                logger.info(f"Loaded provider {provider_name} ({provider_id})")
+            except Exception as e:
+                logger.error(f"Failed to instantiate provider {provider_name} ({provider_id}): {e}")
+
+        if provider_inst:
+            self._providers[provider_id] = provider_inst
+
+    def get_provider(self, provider_id: str) -> Optional[BaseProvider]:
+        """获取指定的 provider"""
+        return self._providers.get(provider_id)
+    
+    def get_all_providers(self) -> Dict[str, BaseProvider]:
+        """获取所有 providers"""
+        return self._providers.copy()
+
+    async def fetch_remote_models(self, provider_id: str, model_type: str = "llm") -> list[dict]:
+        """
+        Fetch available models from a provider's remote API.
+        Returns a list of model info dicts.
+        """
+        provider = self.get_provider(provider_id)
+        if not provider:
+            raise ValueError(f"Provider {provider_id} not found")
+        try:
+            models = await provider.get_llm_list()
+            return models
+        except Exception as e:
+            logger.error(f"Failed to fetch remote models for provider {provider_id}: {e}")
+            raise

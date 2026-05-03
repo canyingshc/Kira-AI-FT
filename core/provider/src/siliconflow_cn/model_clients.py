@@ -1,0 +1,244 @@
+from openai import AsyncOpenAI, APIStatusError, APITimeoutError, APIConnectionError
+from io import BytesIO
+from typing import Optional
+import httpx
+import base64
+import time
+
+from core.provider import ModelInfo
+from core.provider import (LLMModelClient, ImageModelClient, TTSModelClient,
+                           STTModelClient, EmbeddingModelClient, RerankModelClient)
+from core.logging_manager import get_logger
+from core.provider.llm_model import LLMRequest, LLMResponse, RerankResult
+
+from core.chat.message_elements import Record, Image
+
+logger = get_logger("provider", "purple")
+
+
+class SiliconflowLLMClient(LLMModelClient):
+    def __init__(self, model: ModelInfo):
+        super().__init__(model)
+
+    async def chat(self, request: LLMRequest, **kwargs) -> LLMResponse:
+        timeout_sec = self.model.model_config.get("timeout", 120) if self.model.model_config else 120
+        client = AsyncOpenAI(
+            api_key=self.model.provider_config.get("api_key", ""),
+            base_url="https://api.siliconflow.cn/v1",
+            timeout=timeout_sec
+        )
+        try:
+            start_time = time.perf_counter()
+            temperature = self.model.model_config.get("temperature") if self.model.model_config else None
+            response = await client.chat.completions.create(
+                model=self.model.model_id,
+                messages=request.messages,
+                tools=request.tools if request.tools else None,
+                tool_choice=request.tool_choice if request.tool_choice != "none" else None,
+                temperature=temperature if temperature is not None else 1
+            )
+            end_time = time.perf_counter()
+            llm_resp = LLMResponse("")
+            llm_resp.time_consumed = round(end_time - start_time, 2)
+            if response.choices:
+                message = response.choices[0].message
+
+                if message.tool_calls:
+
+                    for tool_call in message.tool_calls:
+                        name = tool_call.function.name
+
+                        llm_resp.tool_calls.append({
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": tool_call.function.arguments
+                            }
+                        })
+
+                content = message.content if message.content else ""
+                reasoning_content = getattr(message, "reasoning_content", "")
+                llm_resp.text_response = content
+                llm_resp.reasoning_content = reasoning_content
+                llm_resp.input_tokens = response.usage.prompt_tokens
+                llm_resp.output_tokens = response.usage.completion_tokens
+            return llm_resp
+        except APIStatusError as e:
+            raise
+        except APITimeoutError as e:
+            raise
+        except APIConnectionError as e:
+            raise
+        except Exception as e:
+            raise
+
+
+class SiliconflowImageClient(ImageModelClient):
+    def __init__(self, model: ModelInfo):
+        super().__init__(model)
+
+    async def text_to_image(self, prompt) -> Image:
+        url = "https://api.siliconflow.cn/v1/images/generations"
+        payload = {
+            "model": self.model.model_id,
+            "prompt": prompt,
+            "image_size": self.model.model_config.get("image_size", "1024x1024"),
+            "batch_size": 1,
+            "num_inference_steps": self.model.model_config.get("num_inference_steps", 20),
+            "guidance_scale": 7.5
+        }
+        headers = {
+            "Authorization": f"Bearer {self.model.provider_config.get('api_key', '')}",
+            "Content-Type": "application/json"
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+        image_url = response.json().get("images")[0].get("url")
+        return Image(image=image_url)
+
+
+class SiliconflowTTSClient(TTSModelClient):
+    def __init__(self, model: ModelInfo):
+        super().__init__(model)
+
+    async def text_to_speech(self, text: str, **kwargs) -> Record:
+        client = AsyncOpenAI(
+            api_key=self.model.provider_config.get("api_key", ""),
+            base_url="https://api.siliconflow.cn/v1"
+        )
+
+        async with client.audio.speech.with_streaming_response.create(
+                model=self.model.model_id,
+                voice=self.model.model_config.get("voice_name", ""),
+                input=text,
+                response_format="mp3"
+        ) as response:
+            # response.stream_to_file(speech_file_path)
+            audio_bytes = b""
+            async for chunk in response.iter_bytes():
+                audio_bytes += chunk
+
+        b64_str = base64.b64encode(audio_bytes).decode("utf-8")
+        # audio_bs64 = f"base64://{b64_str}"
+        # return b64_str
+        return Record(record=b64_str)
+
+
+class SiliconflowSTTClient(STTModelClient):
+    def __init__(self, model: ModelInfo):
+        super().__init__(model)
+
+    async def speech_to_text(self, record: Record, **kwargs):
+        url = "https://api.siliconflow.cn/v1/audio/transcriptions"
+
+        audio_base64 = await record.to_base64()
+
+        audio_data = base64.b64decode(audio_base64)
+        audio_file = BytesIO(audio_data)
+        audio_file.name = "audio.wav"
+
+        files = {"file": audio_file}
+        payload = {"model": self.model.model_id}
+        headers = {"Authorization": f"Bearer {self.model.provider_config.get('api_key', '')}"}
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                url,
+                data=payload,
+                files=files,
+                headers=headers
+            )
+            response.raise_for_status()
+        resp_json = response.json()
+        return resp_json.get("text", "")
+
+
+class SiliconflowEmbeddingClient(EmbeddingModelClient):
+    def __init__(self, model: ModelInfo):
+        super().__init__(model)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+
+        timeout_sec = self.model.model_config.get("timeout", 60) if self.model.model_config else 60
+        slow_threshold = self.model.model_config.get("slow_request_threshold", 5.0) if self.model.model_config else 5.0
+
+        client = AsyncOpenAI(
+            api_key=self.model.provider_config.get("api_key", ""),
+            base_url="https://api.siliconflow.cn/v1",
+            timeout=timeout_sec
+        )
+        try:
+            start_time = time.perf_counter()
+            response = await client.embeddings.create(
+                model=self.model.model_id,
+                input=texts
+            )
+            elapsed = round(time.perf_counter() - start_time, 2)
+            if elapsed > slow_threshold:
+                logger.warning(f"Slow embedding request: {elapsed}s (threshold: {slow_threshold}s, model: {self.model.model_id})")
+            return [item.embedding for item in response.data]
+        except (APIStatusError, APITimeoutError, APIConnectionError) as e:
+            logger.error(f"Embedding API error: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Embedding error: {e}")
+            return []
+
+
+class SiliconflowRerankClient(RerankModelClient):
+    def __init__(self, model: ModelInfo):
+        super().__init__(model)
+
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: Optional[int] = None,
+        **kwargs
+    ) -> list[RerankResult]:
+
+        url = "https://api.siliconflow.cn/v1/rerank"
+
+        payload = {
+            "model": self.model.model_id,
+            "query": query,
+            "documents": documents,
+        }
+
+        if top_n:
+            payload["top_n"] = top_n
+
+        if "return_documents" in kwargs:
+            payload["return_documents"] = kwargs["return_documents"]
+
+        if "instruction" in kwargs:
+            payload["instruction"] = kwargs["instruction"]
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self.model.provider_config.get('api_key', '')}",
+                    "Content-Type": "application/json",
+                }
+            )
+
+        resp.raise_for_status()
+        data = resp.json()
+
+        results = [
+            RerankResult(
+                index=item["index"],
+                score=item["relevance_score"],
+                text=documents[item["index"]]
+            )
+            for item in data.get("results", [])
+        ]
+
+        return results

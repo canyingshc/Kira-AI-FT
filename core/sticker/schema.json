@@ -1,0 +1,17 @@
+{
+  "scan_interval": {
+    "type": "integer",
+    "default": 120,
+    "hint": "Interval of scanning unregistered stickers (Unit: minutes)"
+  },
+  "use_hints_pipeline": {
+    "type": "boolean",
+    "default": false,
+    "hint": "Phase 0.4 M5 — when true, sticker prompt only describes the <hints_key type=sticker> usage instead of listing every registered sticker. The full candidate list is asynchronously prepared via HintsPipeline and injected on the next turn. Recommended once you have 10+ stickers; leave false to keep the legacy 'list everything in prompt' behaviour while observing for one week."
+  },
+  "hints_top_k": {
+    "type": "integer",
+    "default": 12,
+    "hint": "Phase 0.4 M5 — when use_hints_pipeline is on, how many sticker candidates to inject per <hints_key>. Pure substring/keyword match against sticker descriptions; ranked by occurrence count then registration order."
+  }
+}

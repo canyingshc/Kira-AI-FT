@@ -1,0 +1,29 @@
+default_persona_template = """\
+character：
+  ChineseName：
+  NickName(s): []
+  EnglishName：
+  gender：
+  age：
+  birthday: 
+  personality：
+    - p1
+    - p2
+  appearance: 
+  language: Chinese, English, Japanese (conduct dialogue based on the language the user is using)
+  views：
+    - 
+    - 
+  values：
+    - 
+    - 
+  hobbies：
+    - 
+    - 
+  expressions:
+    - 
+    - 
+  dialogue_style_imitation:
+    - user: some text... - assistant: msg1: response text 1
+    - user: some text... - assistant: msg1: response text 1, msg2: response text 2
+"""
