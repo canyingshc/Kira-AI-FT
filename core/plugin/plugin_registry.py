@@ -234,7 +234,14 @@ class RegisterDeco:
         return decorator
 
     @staticmethod
-    def hints_handler(key_type: str, ttl_seconds: Optional[int] = None):
+    def hints_handler(
+        key_type: str,
+        ttl_seconds: Optional[int] = None,
+        mode: str = "every",
+        interval: int = 1,
+        probability: float = 1.0,
+        seed: Optional[int] = None,
+    ):
         """Phase 0.4 M5: register a HintsKeyHandler factory on a plugin.
 
         The decorated method receives ``self`` (the plugin instance) and
@@ -255,6 +262,20 @@ class RegisterDeco:
         :param ttl_seconds: optional override for handler.ttl_seconds.
                             ``None`` means honour whatever the handler
                             instance declares.
+        :param mode:        FrequencyPolicy mode. ``"every"`` (default)
+                            schedules ``prepare()`` on every emission;
+                            ``"interval"`` only schedules every Nth
+                            emission (see ``interval``); ``"random"``
+                            schedules with probability ``probability``.
+        :param interval:    when ``mode="interval"``, schedule on the
+                            ``N``-th emission and every ``N``-th after.
+                            Defaults to 1 (= every).
+        :param probability: when ``mode="random"``, probability in
+                            ``[0.0, 1.0]`` of scheduling each emission.
+                            Defaults to 1.0 (= every).
+        :param seed:        when ``mode="random"``, RNG seed for
+                            deterministic replays. ``None`` uses the OS
+                            random source.
         """
         def decorator(func: Callable):
             plugin_id = get_obj_plugin_id(func)
@@ -263,6 +284,10 @@ class RegisterDeco:
             hints_factories.append({
                 "key_type": key_type,
                 "ttl_seconds": ttl_seconds,
+                "mode": mode,
+                "interval": interval,
+                "probability": probability,
+                "seed": seed,
                 "func": func,
             })
             return func
@@ -352,6 +377,37 @@ class OnEventDeco:
             return func
         return decorator
 
+    def hints_produced(self, priority: Union[Priority, int] = Priority.MEDIUM):
+        """Post-M5 amendment: observe hints pipeline outcomes.
+
+        Fires fire-and-forget (each observer in its own asyncio.Task)
+        whenever a ``<hints_key>`` emission resolves — success with a
+        produced PromptBlock, success with None, prepare exception, or
+        FrequencyPolicy skip. Handler signature::
+
+            async def f(event, hints_result: HintsResult) -> None
+
+        Where ``hints_result`` carries ``session_id`` / ``key_type`` /
+        ``keys`` / ``block`` / ``error`` / ``elapsed_ms`` /
+        ``skipped_by_policy`` / ``plugin_id`` (see
+        :class:`core.pipeline.hints_pipeline.HintsResult`).
+
+        Use cases: logging hint stats, cross-plugin chains (one plugin's
+        hint triggers another's behaviour), debug dashboards. **Do not**
+        register a HintsKeyHandler for a key_type you don't own — use
+        this observer instead and read ``hints_result.block`` to inspect
+        the foreign plugin's contribution.
+
+        Observer slowness does not delay the user-visible message path
+        (pipeline schedules each observer as a separate task). Cancellation
+        of a prepare() task does NOT fire this event (that path is
+        considered an internal overwrite, not a real outcome).
+        """
+        def decorator(func: Callable):
+            self._register_hook(func, priority, EventType.ON_HINTS_PRODUCED)
+            return func
+        return decorator
+
     def tool_result(self, priority: Union[Priority, int] = Priority.MEDIUM):
         def decorator(func: Callable):
             self._register_hook(func, priority, EventType.ON_TOOL_RESULT)
@@ -373,31 +429,6 @@ class OnEventDeco:
     def final_result(self, priority: Union[Priority, int] = Priority.MEDIUM):
         def decorator(func: Callable):
             self._register_hook(func, priority, EventType.ON_FINAL_RESULT)
-            return func
-        return decorator
-
-    def output_pipeline(self, priority: Union[Priority, int] = Priority.MEDIUM):
-        """Phase 0.5 M7: subscribe to the output post-processing pipeline.
-
-        Fires after :data:`EventType.AFTER_LLM_RESPONSE_PARSE` and before
-        the framework actually calls ``send_message_chain``. Handler signature::
-
-            async def f(event, ctx: OutputCtx) -> None
-
-        ``ctx`` is mutable. Handlers may rewrite ``ctx.chains`` (split,
-        merge, drop, edit), set per-chain ``ctx.delays`` (None = let the
-        SYS_LOW DefaultDelayHook fill in), set ``ctx.intercepted=True``
-        to drop the whole step, or stash notes in ``ctx.meta``.
-
-        Phase 5 will register higher-priority handlers here for delay
-        budget / patience / unsent. M7 only ships DefaultDelayHook at
-        SYS_LOW so behaviour matches pre-M7.
-
-        :param priority: standard event priority. Use MEDIUM/HIGH for
-            domain logic; SYS_LOW is reserved for framework defaults.
-        """
-        def decorator(func: Callable):
-            self._register_hook(func, priority, EventType.ON_OUTPUT_PIPELINE)
             return func
         return decorator
 
@@ -753,8 +784,33 @@ class PluginManager:
                 handler.key_type = meta["key_type"]
             if meta.get("ttl_seconds") is not None:
                 handler.ttl_seconds = int(meta["ttl_seconds"])
+            # Build FrequencyPolicy. Precedence (highest first):
+            #   1. handler instance's ``_frequency_policy`` attribute —
+            #      lets the factory read plugin config and produce a
+            #      runtime-decided policy without going through the
+            #      decorator.
+            #   2. decorator-supplied mode/interval/probability/seed —
+            #      static authorial intent.
+            # Local import so plugin_registry doesn't pull in pipeline
+            # at module load.
+            policy = getattr(handler, "_frequency_policy", None)
+            if policy is None:
+                try:
+                    from core.pipeline.hints_pipeline import FrequencyPolicy
+                    policy = FrequencyPolicy(
+                        mode=meta.get("mode", "every"),
+                        interval=int(meta.get("interval", 1)),
+                        probability=float(meta.get("probability", 1.0)),
+                        seed=meta.get("seed"),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to build FrequencyPolicy for "
+                        f"key_type='{handler.key_type}' from {plugin_id} "
+                        f"(falling back to every): {e}"
+                    )
             try:
-                pipeline.register(handler, plugin_id=plugin_id)
+                pipeline.register(handler, plugin_id=plugin_id, policy=policy)
             except Exception as e:
                 logger.error(
                     f"HintsPipeline.register failed for "

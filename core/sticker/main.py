@@ -224,6 +224,10 @@ class DefaultStickerPlugin(BasePlugin):
         # Phase 0.4 M5 config
         self.use_hints_pipeline: bool = False
         self.hints_top_k: int = 12
+        # Post-M5 amendment: FrequencyPolicy config — every / interval / random
+        self.hints_policy_mode: str = "every"
+        self.hints_policy_interval: int = 1
+        self.hints_policy_probability: float = 1.0
 
     async def initialize(self):
         self.scan_interval = self.plugin_cfg.get("scan_interval", 120)
@@ -232,6 +236,10 @@ class DefaultStickerPlugin(BasePlugin):
         # new path after explicit opt-in.
         self.use_hints_pipeline = bool(self.plugin_cfg.get("use_hints_pipeline", False))
         self.hints_top_k = int(self.plugin_cfg.get("hints_top_k", 12))
+        # Post-M5 amendment: FrequencyPolicy knobs.
+        self.hints_policy_mode = str(self.plugin_cfg.get("hints_policy_mode", "every"))
+        self.hints_policy_interval = int(self.plugin_cfg.get("hints_policy_interval", 1))
+        self.hints_policy_probability = float(self.plugin_cfg.get("hints_policy_probability", 1.0))
 
         self.sticker_mgr.on_sticker_registered(self.on_sticker_registered)
 
@@ -323,4 +331,22 @@ class DefaultStickerPlugin(BasePlugin):
     def _make_sticker_hints_handler(self) -> Optional[HintsKeyHandler]:
         if not self.use_hints_pipeline:
             return None
-        return StickerHintsKeyHandler(ctx=self.ctx, top_k=self.hints_top_k)
+        handler = StickerHintsKeyHandler(ctx=self.ctx, top_k=self.hints_top_k)
+        # Post-M5 amendment: attach a config-driven FrequencyPolicy. The
+        # plugin registry honours this attribute over the decorator-
+        # supplied defaults (which we left at "every"), so flipping
+        # hints_policy_mode in the plugin config takes effect after a
+        # plugin reload without touching the decorator.
+        try:
+            from core.pipeline.hints_pipeline import FrequencyPolicy
+            handler._frequency_policy = FrequencyPolicy(
+                mode=self.hints_policy_mode,
+                interval=self.hints_policy_interval,
+                probability=self.hints_policy_probability,
+            )
+        except Exception as e:
+            logger.warning(
+                f"sticker: could not attach FrequencyPolicy "
+                f"(falling back to 'every'): {e}"
+            )
+        return handler

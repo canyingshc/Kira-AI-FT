@@ -36,21 +36,20 @@ class EventType(Enum):
     # 但本事件中不应再修改 — 修改用 AFTER_XML_PARSE)。
     AFTER_LLM_RESPONSE_PARSE = "after_llm_response_parse"
     AFTER_XML_PARSE = "after_xml_parse"  # XML 解析后 (MessageChain)
-    # Phase 0.5 M7: 输出后处理钩子链。在 AFTER_XML_PARSE / AFTER_LLM_RESPONSE_PARSE
-    # 之后、真正调用 send_message_chain 之前触发。处理器签名:
-    #   async def f(event, ctx: OutputCtx) -> None
-    # OutputCtx 是唯一可变状态容器 (chains/delays/intercepted/meta), 钩子按
-    # priority 降序执行, 期间允许:
-    #   - 修改 ctx.chains    (拆分/合并/删除/编辑消息)
-    #   - 设置 ctx.delays    (每条消息发送前等待秒数, None=由 DefaultDelayHook 填默认)
-    #   - 标 ctx.intercepted (整批消息不发送, 但 ON_STEP_RESULT 仍触发)
-    # 框架内置 DefaultDelayHook 在 SYS_LOW 优先级跑, 只填还是 None 的 delay 槽位,
-    # 不覆盖更高优先级钩子的决定。Phase 5 的延迟预算/耐心节奏/unsent 全部挂这里。
-    # 关键约束: 钩子链整体在 session_lock 内, delay 不应超过 ~5s (会阻塞同 sid 后续消息)。
-    ON_OUTPUT_PIPELINE = "on_output_pipeline"
     ON_TOOL_RESULT = "on_tool_result"  # 工具调用结果
     ON_STEP_RESULT = "on_step_result"  # Agent 步骤结果
     ON_FINAL_RESULT = "on_final_result"  # 最终消息结果
+    # post-M5 amendment: hints pipeline observer event. Fired by
+    # HintsPipeline whenever a hint emission completes processing
+    # (success / None result / handler exception / FrequencyPolicy skip).
+    # Handler signature:
+    #   async def f(event, hints_result: HintsResult)
+    # 'event' is the KiraMessageBatchEvent whose ON_STEP_RESULT triggered
+    # the hint ingest. Observer fires fire-and-forget relative to the
+    # main message path: a slow observer cannot block the user-visible
+    # turn. Use this to log / chain / debug hints without registering
+    # a competing HintsKeyHandler for the same key_type.
+    ON_HINTS_PRODUCED = "on_hints_produced"
     ON_EXCEPTION = "on_exception"  # 异常发生时
     ...
 

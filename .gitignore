@@ -12,7 +12,7 @@ venv/
 .venv/
 docs/
 copy/
-test/
+tests/
 .env
 
 # Frontend

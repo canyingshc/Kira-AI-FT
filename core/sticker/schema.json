@@ -13,5 +13,20 @@
     "type": "integer",
     "default": 12,
     "hint": "Phase 0.4 M5 — when use_hints_pipeline is on, how many sticker candidates to inject per <hints_key>. Pure substring/keyword match against sticker descriptions; ranked by occurrence count then registration order."
+  },
+  "hints_policy_mode": {
+    "type": "string",
+    "default": "every",
+    "hint": "Post-M5 amendment — FrequencyPolicy mode. 'every' = prepare runs on every <hints_key type=sticker> emission (M5 default). 'interval' = only every N-th emission triggers prepare (use hints_policy_interval). 'random' = prepare runs with probability hints_policy_probability. Useful when you don't want sticker candidates injected every time the LLM asks (emergent variety)."
+  },
+  "hints_policy_interval": {
+    "type": "integer",
+    "default": 1,
+    "hint": "Post-M5 amendment — when hints_policy_mode='interval', schedule prepare on emissions N, 2N, 3N… Default 1 = every."
+  },
+  "hints_policy_probability": {
+    "type": "number",
+    "default": 1.0,
+    "hint": "Post-M5 amendment — when hints_policy_mode='random', probability in [0,1] that an emission schedules prepare. Default 1.0 = every."
   }
 }
