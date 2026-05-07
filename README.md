@@ -1,4 +1,4 @@
-# 🧬 KiraAI Phase 0 — 框架基建分支
+# 🧬 KiraAI FT  — 框架基建分支
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10+-brightgreen" alt="python">
